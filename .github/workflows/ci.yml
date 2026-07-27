@@ -40,7 +40,7 @@ jobs:
           -v "$PWD:/app" \
           -w /app \
           macro-pulse:ci \
-          sh -lc "uv run --frozen python -m unittest discover tests 2>&1 | tee unit-test.log"
+          sh -lc "set -o pipefail; uv run --frozen python -m unittest discover tests 2>&1 | tee unit-test.log"
 
     - name: Upload CI artifacts
       if: always()
