@@ -3,9 +3,9 @@
     "KR": {
       "description": "Korean market close summary focused on domestic indices, Asia peers, local bond context, and FX.",
       "workflow_schedule": {
-        "cron": "00 08 * * 1-5",
-        "local_time": "17:00 KST",
-        "utc_time": "08:00 UTC",
+        "cron": "58 07 * * 1-5",
+        "local_time": "16:58 KST",
+        "utc_time": "07:58 UTC",
         "weekdays": "Mon-Fri"
       },
       "summary_sections": [
@@ -40,9 +40,9 @@
     "US": {
       "description": "US market close summary focused on US and European indices, commodities, crypto, and broad risk assets.",
       "workflow_schedule": {
-        "cron": "30 21 * * 1-5",
-        "local_time": "06:30 KST",
-        "utc_time": "21:30 UTC",
+        "cron": "28 21 * * 1-5",
+        "local_time": "06:28 KST",
+        "utc_time": "21:28 UTC",
         "weekdays": "Tue-Sat KST"
       },
       "summary_sections": [
