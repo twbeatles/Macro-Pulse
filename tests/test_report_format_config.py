@@ -32,8 +32,8 @@ class ReportFormatConfigTests(unittest.TestCase):
         kr_schedule = get_workflow_schedule("KR", config)
         us_schedule = get_workflow_schedule("US", config)
 
-        self.assertEqual(kr_schedule.cron, "00 07 * * 1-5")
-        self.assertEqual(kr_schedule.local_time, "16:00 KST")
+        self.assertEqual(kr_schedule.cron, "07 07 * * 1-5")
+        self.assertEqual(kr_schedule.local_time, "16:07 KST")
         self.assertEqual(kr_schedule.weekdays, "Mon-Fri")
 
         self.assertEqual(us_schedule.cron, "28 21 * * 1-5")
@@ -131,14 +131,15 @@ class ReportFormatConfigTests(unittest.TestCase):
             workflow_text = handle.read()
 
         self.assertTrue(workflow_matches_config(workflow_text, config))
-        self.assertIn("# KR | 16:00 KST | 07:00 UTC | Mon-Fri", workflow_text)
+        self.assertIn("# KR | 16:07 KST | 07:07 UTC | Mon-Fri", workflow_text)
+        self.assertIn("- cron: '37 07 * * 1-5'", workflow_text)
         self.assertEqual(
             render_daily_workflow_schedule_block(config),
             "\n".join(
                 [
                     "    # BEGIN GENERATED SCHEDULES",
-                    "    # KR | 16:00 KST | 07:00 UTC | Mon-Fri",
-                    "    - cron: '00 07 * * 1-5'",
+                    "    # KR | 16:07 KST | 07:07 UTC | Mon-Fri",
+                    "    - cron: '07 07 * * 1-5'",
                     "    # US | 06:28 KST | 21:28 UTC | Tue-Sat KST",
                     "    - cron: '28 21 * * 1-5'",
                     "    # END GENERATED SCHEDULES",

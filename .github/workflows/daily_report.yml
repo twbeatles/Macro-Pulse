@@ -2,15 +2,29 @@ name: Daily Macro Pulse Report
 
 on:
   schedule:
+    # Avoid minute 00: GitHub Actions often delays/skips top-of-hour crons under load.
     # BEGIN GENERATED SCHEDULES
-    # KR | 16:00 KST | 07:00 UTC | Mon-Fri
-    - cron: '00 07 * * 1-5'
+    # KR | 16:07 KST | 07:07 UTC | Mon-Fri
+    - cron: '07 07 * * 1-5'
     # US | 06:28 KST | 21:28 UTC | Tue-Sat KST
     - cron: '28 21 * * 1-5'
     # END GENERATED SCHEDULES
+    # KR safety net (hand-maintained): if the primary 07:07 slot is skipped under load.
+    - cron: '37 07 * * 1-5'
   workflow_dispatch:
+    inputs:
+      market:
+        description: "Market mode override (KR/US/Global)"
+        required: false
+        default: Global
+        type: choice
+        options:
+          - Global
+          - KR
+          - US
 
 permissions:
+  actions: read
   contents: read
   pages: write
   id-token: write
@@ -22,6 +36,8 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
+    outputs:
+      skipped: ${{ steps.dedupe.outputs.skip }}
     env:
       REPORT_FORMAT_CONFIG: config/report_formats.json
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
@@ -63,23 +79,80 @@ jobs:
     - name: Resolve market mode from schedule
       id: market
       run: |
+        if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+          mode="${{ inputs.market }}"
+          mode="${mode:-Global}"
+          echo "mode=${mode}" >> "$GITHUB_OUTPUT"
+          echo "Resolved market mode: ${mode} (workflow_dispatch input)"
+          exit 0
+        fi
+
         schedule="${{ github.event.schedule }}"
         case "$schedule" in
-          "00 07 * * 1-5")
+          "07 07 * * 1-5"|"37 07 * * 1-5")
             mode=KR
             ;;
           "28 21 * * 1-5")
             mode=US
             ;;
           *)
-            # workflow_dispatch 등: main.py의 시간 기반 auto mode
+            # 알 수 없는 schedule: main.py의 시간 기반 auto mode
             mode=Global
             ;;
         esac
         echo "mode=${mode}" >> "$GITHUB_OUTPUT"
         echo "Resolved market mode: ${mode} (schedule='${schedule}')"
 
+    # 같은 날 KR 스케줄이 이미 성공했으면 안전망 cron 중복 발송을 막는다.
+    - name: Skip duplicate KR scheduled delivery
+      id: dedupe
+      if: ${{ github.event_name == 'schedule' && steps.market.outputs.mode == 'KR' }}
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        set -euo pipefail
+        today="$(date -u +%Y-%m-%d)"
+        window_start="${today}T06:50:00Z"
+        window_end="${today}T10:00:00Z"
+        payload="$(curl -sS \
+          -H "Authorization: Bearer ${GH_TOKEN}" \
+          -H "Accept: application/vnd.github+json" \
+          "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/workflows/daily_report.yml/runs?event=schedule&status=completed&per_page=30")"
+        prior_count="$(
+          PAYLOAD="$payload" \
+          RUN_ID="$GITHUB_RUN_ID" \
+          WINDOW_START="$window_start" \
+          WINDOW_END="$window_end" \
+          python3 - <<'PY'
+import json
+import os
+
+data = json.loads(os.environ["PAYLOAD"])
+run_id = int(os.environ["RUN_ID"])
+start = os.environ["WINDOW_START"]
+end = os.environ["WINDOW_END"]
+count = 0
+for run in data.get("workflow_runs", []):
+    if run.get("id") == run_id:
+        continue
+    if run.get("conclusion") != "success":
+        continue
+    created = run.get("created_at") or ""
+    if start <= created < end:
+        count += 1
+print(count)
+PY
+        )"
+        if [ "${prior_count}" -gt 0 ]; then
+          echo "skip=true" >> "$GITHUB_OUTPUT"
+          echo "Skipping KR delivery: ${prior_count} successful schedule run(s) already in ${window_start}..${window_end}"
+        else
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+          echo "No prior successful KR-window schedule run found; continuing."
+        fi
+
     - name: Run Macro Pulse Bot in Docker
+      if: ${{ steps.dedupe.outputs.skip != 'true' }}
       run: |
         docker run --rm \
           -e REPORT_FORMAT_CONFIG \
@@ -89,23 +162,23 @@ jobs:
           -w /app \
           macro-pulse:daily \
           sh -lc "uv run --frozen python src/main.py --market '${{ steps.market.outputs.mode }}' 2>&1 | tee macro-pulse.log"
-      
+
     - name: Validate generated report
-      if: success()
+      if: ${{ success() && steps.dedupe.outputs.skip != 'true' }}
       run: test -s macro_pulse_report.html
 
     - name: Prepare public directory
-      if: success()
+      if: ${{ success() && steps.dedupe.outputs.skip != 'true' }}
       run: |
         mkdir -p public
         mv macro_pulse_report.html public/index.html
 
     - name: Configure GitHub Pages
-      if: success()
+      if: ${{ success() && steps.dedupe.outputs.skip != 'true' }}
       uses: actions/configure-pages@v5
 
     - name: Upload GitHub Pages artifact
-      if: success()
+      if: ${{ success() && steps.dedupe.outputs.skip != 'true' }}
       uses: actions/upload-pages-artifact@v4
       with:
         path: ./public
@@ -123,7 +196,7 @@ jobs:
         if-no-files-found: ignore
 
   deploy:
-    if: ${{ needs.build.result == 'success' }}
+    if: ${{ needs.build.result == 'success' && needs.build.outputs.skipped != 'true' }}
     needs: build
     runs-on: ubuntu-latest
     environment:
