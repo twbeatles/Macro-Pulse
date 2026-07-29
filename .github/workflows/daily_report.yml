@@ -118,31 +118,8 @@ jobs:
           -H "Authorization: Bearer ${GH_TOKEN}" \
           -H "Accept: application/vnd.github+json" \
           "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/workflows/daily_report.yml/runs?event=schedule&status=completed&per_page=30")"
-        prior_count="$(
-          PAYLOAD="$payload" \
-          RUN_ID="$GITHUB_RUN_ID" \
-          WINDOW_START="$window_start" \
-          WINDOW_END="$window_end" \
-          python3 - <<'PY'
-import json
-import os
-
-data = json.loads(os.environ["PAYLOAD"])
-run_id = int(os.environ["RUN_ID"])
-start = os.environ["WINDOW_START"]
-end = os.environ["WINDOW_END"]
-count = 0
-for run in data.get("workflow_runs", []):
-    if run.get("id") == run_id:
-        continue
-    if run.get("conclusion") != "success":
-        continue
-    created = run.get("created_at") or ""
-    if start <= created < end:
-        count += 1
-print(count)
-PY
-        )"
+        prior_count="$(printf '%s' "$payload" | jq --argjson run_id "$GITHUB_RUN_ID" --arg start "$window_start" --arg end "$window_end" \
+          '[.workflow_runs[] | select(.id != $run_id and .conclusion == "success" and .created_at >= $start and .created_at < $end)] | length')"
         if [ "${prior_count}" -gt 0 ]; then
           echo "skip=true" >> "$GITHUB_OUTPUT"
           echo "Skipping KR delivery: ${prior_count} successful schedule run(s) already in ${window_start}..${window_end}"
