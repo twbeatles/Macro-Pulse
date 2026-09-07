@@ -9,8 +9,6 @@ on:
     # US | 06:28 KST | 21:28 UTC | Tue-Sat KST
     - cron: '28 21 * * 1-5'
     # END GENERATED SCHEDULES
-    # KR safety net (hand-maintained): if the primary 07:07 slot is skipped under load.
-    - cron: '37 07 * * 1-5'
   workflow_dispatch:
     inputs:
       market:
@@ -30,8 +28,10 @@ permissions:
   id-token: write
 
 concurrency:
-  group: github-pages
-  cancel-in-progress: true
+  # One in-flight run per cron slot. Do not cancel: the first run may already
+  # have sent Telegram, and cancelling it would let a duplicate send again.
+  group: daily-macro-${{ github.event.schedule || format('dispatch-{0}', github.run_id) }}
+  cancel-in-progress: false
 
 jobs:
   build:
@@ -47,7 +47,56 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@v5
 
+    # schedule 트리거별로 시장 모드를 고정한다.
+    # GitHub Actions cron 지연이 있어도 UTC 시각 기반 자동 판정이 어긋나지 않게 한다.
+    # cron 문자열을 바꾸면 config/report_formats.json 과 이 case 문을 함께 맞출 것.
+    - name: Resolve market mode from schedule
+      id: market
+      run: |
+        if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+          mode="${{ inputs.market }}"
+          mode="${mode:-Global}"
+          echo "mode=${mode}" >> "$GITHUB_OUTPUT"
+          echo "Resolved market mode: ${mode} (workflow_dispatch input)"
+          exit 0
+        fi
+
+        schedule="${{ github.event.schedule }}"
+        case "$schedule" in
+          "07 07 * * 1-5")
+            mode=KR
+            ;;
+          "28 21 * * 1-5")
+            mode=US
+            ;;
+          *)
+            # 알 수 없는 schedule: main.py의 시간 기반 auto mode
+            mode=Global
+            ;;
+        esac
+        echo "mode=${mode}" >> "$GITHUB_OUTPUT"
+        echo "Resolved market mode: ${mode} (schedule='${schedule}')"
+
+    # GitHub delays cron by hours. A fixed 06:50-10:00 UTC window therefore misses
+    # the earlier KR run and a second slot (or a double-fired cron) sends again.
+    # Skip if another successful or still-running scheduled run exists in the last 6h.
+    - name: Skip duplicate scheduled delivery
+      id: dedupe
+      if: ${{ github.event_name == 'schedule' }}
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        set -euo pipefail
+        payload="$(curl -sS \
+          -H "Authorization: Bearer ${GH_TOKEN}" \
+          -H "Accept: application/vnd.github+json" \
+          "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/workflows/daily_report.yml/runs?event=schedule&per_page=30")"
+        skip_line="$(printf '%s' "$payload" | PYTHONPATH=src python3 -m macro_pulse.workflows.schedule_dedupe --run-id "$GITHUB_RUN_ID")"
+        echo "$skip_line" >> "$GITHUB_OUTPUT"
+        echo "Dedupe result: ${skip_line}"
+
     - name: Build runtime image
+      if: ${{ steps.dedupe.outputs.skip != 'true' }}
       run: |
         # Docker Hub pulls can flake on GitHub-hosted runners (IPv6/network blips).
         # Retry with exponential backoff before failing the job.
@@ -66,67 +115,13 @@ jobs:
         done
 
     - name: Run unit tests in Docker
+      if: ${{ steps.dedupe.outputs.skip != 'true' }}
       run: |
         docker run --rm \
           -v "$PWD:/app" \
           -w /app \
           macro-pulse:daily \
           sh -lc "set -o pipefail; uv run --frozen python -m unittest discover tests 2>&1 | tee unit-test.log"
-
-    # schedule 트리거별로 시장 모드를 고정한다.
-    # GitHub Actions cron 지연이 있어도 UTC 시각 기반 자동 판정이 어긋나지 않게 한다.
-    # cron 문자열을 바꾸면 config/report_formats.json 과 이 case 문을 함께 맞출 것.
-    - name: Resolve market mode from schedule
-      id: market
-      run: |
-        if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-          mode="${{ inputs.market }}"
-          mode="${mode:-Global}"
-          echo "mode=${mode}" >> "$GITHUB_OUTPUT"
-          echo "Resolved market mode: ${mode} (workflow_dispatch input)"
-          exit 0
-        fi
-
-        schedule="${{ github.event.schedule }}"
-        case "$schedule" in
-          "07 07 * * 1-5"|"37 07 * * 1-5")
-            mode=KR
-            ;;
-          "28 21 * * 1-5")
-            mode=US
-            ;;
-          *)
-            # 알 수 없는 schedule: main.py의 시간 기반 auto mode
-            mode=Global
-            ;;
-        esac
-        echo "mode=${mode}" >> "$GITHUB_OUTPUT"
-        echo "Resolved market mode: ${mode} (schedule='${schedule}')"
-
-    # 같은 날 KR 스케줄이 이미 성공했으면 안전망 cron 중복 발송을 막는다.
-    - name: Skip duplicate KR scheduled delivery
-      id: dedupe
-      if: ${{ github.event_name == 'schedule' && steps.market.outputs.mode == 'KR' }}
-      env:
-        GH_TOKEN: ${{ github.token }}
-      run: |
-        set -euo pipefail
-        today="$(date -u +%Y-%m-%d)"
-        window_start="${today}T06:50:00Z"
-        window_end="${today}T10:00:00Z"
-        payload="$(curl -sS \
-          -H "Authorization: Bearer ${GH_TOKEN}" \
-          -H "Accept: application/vnd.github+json" \
-          "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/workflows/daily_report.yml/runs?event=schedule&status=completed&per_page=30")"
-        prior_count="$(printf '%s' "$payload" | jq --argjson run_id "$GITHUB_RUN_ID" --arg start "$window_start" --arg end "$window_end" \
-          '[.workflow_runs[] | select(.id != $run_id and .conclusion == "success" and .created_at >= $start and .created_at < $end)] | length')"
-        if [ "${prior_count}" -gt 0 ]; then
-          echo "skip=true" >> "$GITHUB_OUTPUT"
-          echo "Skipping KR delivery: ${prior_count} successful schedule run(s) already in ${window_start}..${window_end}"
-        else
-          echo "skip=false" >> "$GITHUB_OUTPUT"
-          echo "No prior successful KR-window schedule run found; continuing."
-        fi
 
     - name: Run Macro Pulse Bot in Docker
       if: ${{ steps.dedupe.outputs.skip != 'true' }}

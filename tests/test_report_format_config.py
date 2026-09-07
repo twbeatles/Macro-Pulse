@@ -132,7 +132,10 @@ class ReportFormatConfigTests(unittest.TestCase):
 
         self.assertTrue(workflow_matches_config(workflow_text, config))
         self.assertIn("# KR | 16:07 KST | 07:07 UTC | Mon-Fri", workflow_text)
-        self.assertIn("- cron: '37 07 * * 1-5'", workflow_text)
+        self.assertNotIn("- cron: '37 07 * * 1-5'", workflow_text)
+        self.assertNotIn("KR safety net", workflow_text)
+        self.assertIn("daily-macro-${{ github.event.schedule || format('dispatch-{0}', github.run_id) }}", workflow_text)
+        self.assertIn("macro_pulse.workflows.schedule_dedupe", workflow_text)
         self.assertEqual(
             render_daily_workflow_schedule_block(config),
             "\n".join(
